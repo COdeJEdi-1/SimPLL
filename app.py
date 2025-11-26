@@ -31,10 +31,24 @@ sentiment_model, toxicity_pipe, emotion_pipe = load_models()
 @st.cache_data
 def compute_text_features(data):
     data = data.copy()
+
+    # sentiment
     data["sentiment"] = data["title"].apply(lambda x: sentiment_model.polarity_scores(str(x))['compound'])
+
+    # toxicity
     data["toxicity"] = data["title"].apply(lambda x: toxicity_pipe(str(x))[0]['score'])
-    data["emotion"] = data["title"].apply(lambda x: emotion_pipe(str(x))[0]['label'])
+
+    # emotion (fixed)
+    def safe_emotion(text):
+        try:
+            return emotion_pipe(str(text))[0][0]['label']
+        except:
+            return "unknown"
+
+    data["emotion"] = data["title"].apply(safe_emotion)
+
     return data
+
 
 # -------------------------------
 # Streamlit UI
