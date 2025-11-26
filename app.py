@@ -8,7 +8,8 @@ from sklearn.cluster import KMeans
 from sklearn.feature_extraction.text import TfidfVectorizer
 from pyvis.network import Network
 import streamlit.components.v1 as components
-
+from sentence_transformers import SentenceTransformer
+import faiss
 
 # -------------------------------
 # Load dataset
@@ -16,9 +17,8 @@ import streamlit.components.v1 as components
 df = pd.read_csv("processed.csv")
 df['created_utc'] = pd.to_datetime(df['created_utc'])
 
-
 # -------------------------------
-# Initialize NLP Models
+# Load NLP Models
 # -------------------------------
 @st.cache_resource
 def load_models():
@@ -29,9 +29,8 @@ def load_models():
 
 sentiment_model, toxicity_pipe, emotion_pipe = load_models()
 
-
 # -------------------------------
-# Apply NLP Scoring
+# Compute NLP Features
 # -------------------------------
 @st.cache_data
 def compute_text_features(data):
@@ -43,7 +42,7 @@ def compute_text_features(data):
     # toxicity
     data["toxicity"] = data["title"].apply(lambda x: toxicity_pipe(str(x))[0]['score'])
 
-    # emotion
+    # emotion classification
     def safe_emotion(text):
         try:
             return emotion_pipe(str(text))[0][0]['label']
@@ -54,9 +53,19 @@ def compute_text_features(data):
 
     return data
 
+# -------------------------------
+# Load Chatbot Components
+# -------------------------------
+@st.cache_resource
+def load_chat_components():
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    qa_model = pipeline("text-generation", model="mistralai/Mistral-7B-Instruct", max_new_tokens=300)
+    return embedder, qa_model
+
+embedder, qa_model = load_chat_components()
 
 # -------------------------------
-# Streamlit UI
+# UI
 # -------------------------------
 st.title("📊 Link Spread Intelligence Dashboard")
 
@@ -64,47 +73,54 @@ domain1 = st.text_input("Enter a news domain (e.g., cnn.com):")
 domain2 = st.text_input("Optional second domain for comparison:")
 
 if domain1:
+
     filtered = df[df['domain'].str.contains(domain1, case=False, na=False)]
     filtered = compute_text_features(filtered)
 
     st.success(f"{len(filtered)} posts found for {domain1}")
 
-    # Summary metrics
+    # -------------------------------
+    # Summary Metrics
+    # -------------------------------
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Posts", len(filtered))
     col2.metric("Avg Sentiment", round(filtered['sentiment'].mean(), 3))
     col3.metric("Avg Toxicity", round(filtered['toxicity'].mean(), 3))
 
-    # Emotion chart
+    # -------------------------------
+    # Emotion Chart
+    # -------------------------------
     st.subheader("🧠 Emotion Distribution")
     emotion_counts = filtered['emotion'].value_counts()
     fig, ax = plt.subplots()
     sns.barplot(x=emotion_counts.values, y=emotion_counts.index, ax=ax)
     st.pyplot(fig)
 
-    # Time series trend
+    # -------------------------------
+    # Time Series Trend
+    # -------------------------------
     st.subheader("📈 Trend Over Time")
     ts = filtered.resample('D', on='created_utc').size()
     fig2, ax2 = plt.subplots()
     ts.plot(ax=ax2)
     st.pyplot(fig2)
 
+    # -------------------------------
     # Top Subreddits
+    # -------------------------------
     st.subheader("🔥 Top Subreddits Posting This Domain")
     sr = filtered['subreddit'].value_counts().head(10)
     fig3, ax3 = plt.subplots()
     sns.barplot(x=sr.values, y=sr.index, ax=ax3)
     st.pyplot(fig3)
 
-
     # -------------------------------
     # Network Graph
     # -------------------------------
-    st.subheader("🕸 Network Graph: How This Domain Spreads Across Reddit")
+    st.subheader("🕸 Network Graph: Spread Pattern")
 
     def create_network_graph(df, domain):
         net = Network(height="550px", width="100%", bgcolor="#111", font_color="white")
-
         net.add_node(domain, label=domain, color="#00c3ff", size=25)
 
         subreddit_counts = df['subreddit'].value_counts().head(15)
@@ -117,33 +133,22 @@ if domain1:
 
     if not filtered.empty:
         net = create_network_graph(filtered, domain1)
-
         path = "network_graph.html"
         net.save_graph(path)
-
-        with open(path, "r", encoding="utf-8") as f:
-            html = f.read()
-
-        components.html(html, height=600, scrolling=False)
-    else:
-        st.info("Not enough data to build a graph.")
-
+        components.html(open(path, "r", encoding="utf-8").read(), height=600)
 
     # -------------------------------
     # Topic Clustering
     # -------------------------------
-    st.subheader("🧩 Topic Clustering (Auto-Generated Themes)")
-
+    st.subheader("🧩 Topic Clustering (Auto Themes)")
     vectorizer = TfidfVectorizer(stop_words='english', max_features=1000)
     X = vectorizer.fit_transform(filtered['title'])
     kmeans = KMeans(n_clusters=3, random_state=42)
     filtered['cluster'] = kmeans.fit_predict(X)
-
     st.write(filtered[['title', 'cluster']].head(20))
 
-
     # -------------------------------
-    # Narrative Summary
+    # Story Summary
     # -------------------------------
     st.subheader("📌 AI Summary Report")
 
@@ -153,20 +158,73 @@ if domain1:
         top_sub = data['subreddit'].value_counts().idxmax()
 
         return f"""
-        The domain **{dom}** appears **{len(data)} times** across Reddit.
-        The overall conversational tone is **{tone}**, dominated emotionally by **{top_emotion}**.
-        It gains most traction in **r/{top_sub}**.
+        The domain **{dom}** appears **{len(data)} times** in Reddit conversations.
+        Tone is **{tone}**, most emotionally represented by **{top_emotion}**.
+        Most activity originates from **r/{top_sub}**.
 
-        Posting activity peaked at **{data.resample('D', on='created_utc').size().max()} posts/day**, suggesting an event-driven influence.
+        Peak posting activity reached **{data.resample('D', on='created_utc').size().max()} posts/day**, indicating event-driven spikes.
 
-        The clustering model identified **{data['cluster'].nunique()} distinct topic groups**, indicating diverse discussions around this source.
+        Content forms **{data['cluster'].nunique()} main thematic clusters**, revealing diverse narratives.
         """
 
     st.info(generate_story(filtered, domain1))
 
+    # -------------------------------
+    # Chatbot Assistant
+    # -------------------------------
+    st.subheader("💬 Ask the Dataset Anything")
+
+    if len(filtered) > 5:
+
+        @st.cache_data
+        def build_index(df):
+            docs = df["title"].tolist()
+            vectors = embedder.encode(docs)
+            index = faiss.IndexFlatL2(vectors.shape[1])
+            index.add(vectors)
+            return index, docs
+
+        index, docs = build_index(filtered)
+
+        question = st.text_input("Ask a question (e.g., 'Why is this domain increasing in Feb?'):")
+
+        if question:
+            q_vec = embedder.encode([question])
+            scores, result_ids = index.search(q_vec, k=5)
+            matched_texts = "\n".join([f"- {docs[i]}" for i in result_ids[0]])
+
+            prompt = f"""
+            You are a Reddit trend analyst. Based on these posts and analytics below,
+            answer the question clearly and concisely.
+
+            Question:
+            {question}
+
+            Relevant Posts:
+            {matched_texts}
+
+            Stats:
+            - Total posts: {len(filtered)}
+            - Avg sentiment: {filtered['sentiment'].mean():.2f}
+            - Dominant emotion: {filtered['emotion'].value_counts().idxmax()}
+            - Key subreddit: {filtered['subreddit'].value_counts().idxmax()}
+
+            Provide:
+            1. A direct answer
+            2. One additional insight the user didn't ask for
+            """
+
+            with st.spinner("Analyzing..."):
+                response = qa_model(prompt)[0]['generated_text']
+
+            st.write("### 🤖 Answer")
+            st.write(response)
+
+    else:
+        st.info("Not enough data for chatbot analysis.")
 
 # -------------------------------
-# Comparison: Domain1 vs Domain2
+# Domain Comparison
 # -------------------------------
 if domain1 and domain2:
     st.subheader("⚔️ Activity Comparison")
@@ -175,10 +233,8 @@ if domain1 and domain2:
         d = compute_text_features(df[df['domain'].str.contains(dom, case=False, na=False)])
         return d.resample('D', on='created_utc').size()
 
-    ts1, ts2 = get_ts(domain1), get_ts(domain2)
-
     fig4, ax4 = plt.subplots()
-    ts1.plot(ax=ax4, label=domain1)
-    ts2.plot(ax=ax4, label=domain2)
+    get_ts(domain1).plot(ax=ax4, label=domain1)
+    get_ts(domain2).plot(ax=ax4, label=domain2)
     ax4.legend()
     st.pyplot(fig4)
