@@ -36,13 +36,34 @@ domain_input = st.text_input("Enter a domain (e.g., cnn.com):")
 if domain_input:
     filtered = get_domain_data(domain_input)
 
-    if len(filtered) == 0:
+    if filtered.empty:
         st.warning("No results found for this domain.")
     else:
+        # --- Basic count info ---
         st.success(f"Results found: {len(filtered)}")
 
+        # --- Summary insights ---
+        st.subheader("Summary Insights")
+
+        # daily activity
+        daily_counts = filtered.resample("D", on="created_utc").size()
+        peak_day = daily_counts.idxmax().strftime("%b %d, %Y")
+        peak_value = int(daily_counts.max())
+        avg_daily = round(daily_counts.mean(), 2)
+
+        # top subreddit
+        top_subreddit = filtered["subreddit"].value_counts().idxmax()
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Peak posts in a day", peak_value, help="Highest number of posts in a single day")
+        col2.metric("Average posts per day", avg_daily)
+        col3.metric("Top subreddit", top_subreddit)
+
+        # --- Plots ---
         st.write("### Trend Over Time")
         st.pyplot(plot_time_series(filtered))
 
         st.write("### Top Subreddits")
+        st.pyplot(plot_subreddit_bar(filtered))
+
         st.pyplot(plot_subreddit_bar(filtered))
