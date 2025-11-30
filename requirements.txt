@@ -1,0 +1,12 @@
+streamlit
+pandas
+plotly
+google-genai
+vaderSentiment
+transformers
+sentence-transformers
+scikit-learn
+faiss-cpu
+numpy
+networkx
+torch
